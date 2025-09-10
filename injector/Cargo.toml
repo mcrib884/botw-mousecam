@@ -1,0 +1,25 @@
+[package]
+name = "injector"
+version = "3.0.0"
+edition = "2021"
+authors = ["BOTW Mouse Camera Team"]
+description = "Enhanced DLL injector for BOTW Mouse Camera mod"
+
+[[bin]]
+name = "injector"
+path = "src/main.rs"
+
+[dependencies]
+winapi = { workspace = true, features = [
+    "winnt", 
+    "processthreadsapi", 
+    "memoryapi", 
+    "tlhelp32", 
+    "libloaderapi", 
+    "handleapi", 
+    "synchapi", 
+    "winbase", 
+    "errhandlingapi",
+    "securitybaseapi",
+    "winuser"
+] }

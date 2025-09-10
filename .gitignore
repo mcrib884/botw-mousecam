@@ -1,0 +1,67 @@
+# Build artifacts and temporary files
+/target/
+/release/
+*.dll
+*.exe
+*.pdb
+*.lib
+*.obj
+*.log
+
+# Visual Studio / MSBuild artifacts
+bin/
+obj/
+publish/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+
+# Rust specific
+# Keep Cargo.lock for applications, ignore for libraries
+# Cargo.lock  # Uncomment this line if this becomes a library crate
+**/target/
+
+# .NET specific
+position_finder/bin/
+position_finder/obj/
+position_finder/publish/
+position_finder/*.log
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+Thumbs.db
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Documentation build
+docs/_build/
+
+# Test coverage
+*.gcda
+*.gcno
+*.gcov
+
+# Local configuration files (if any)
+config.local.toml
+
+# Runtime logs
+runtime.log
+error.log
+debug.log
