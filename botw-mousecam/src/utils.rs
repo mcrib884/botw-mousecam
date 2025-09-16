@@ -6,15 +6,40 @@ use std::ffi::CString;
 use std::collections::HashMap;
 use winapi::um::{winuser, xinput};
 use winapi::shared::windef::POINT;
+use winapi::shared::minwindef::WORD;
 use log::{info, debug};
 use std::sync::atomic::{Ordering, AtomicBool};
 
-// Simple keyboard emulation using legacy keybd_event for broad compatibility
-fn send_key(vk: u8, pressed: bool) {
+// Modern keyboard emulation using SendInput for better compatibility with games
+pub fn send_key(vk: u8, pressed: bool) {
     unsafe {
-        let flags = if pressed { 0 } else { winuser::KEYEVENTF_KEYUP };
-        winuser::keybd_event(vk, 0, flags, 0);
+        let mut input = winuser::INPUT {
+            type_: winuser::INPUT_KEYBOARD,
+            u: std::mem::zeroed(),
+        };
+        
+        *input.u.ki_mut() = winuser::KEYBDINPUT {
+            wVk: vk as WORD,
+            wScan: 0,
+            dwFlags: if pressed { 0 } else { winuser::KEYEVENTF_KEYUP },
+            time: 0,
+            dwExtraInfo: 0,
+        };
+        
+        winuser::SendInput(1, &mut input, std::mem::size_of::<winuser::INPUT>() as i32);
+        
+        // Add small delay to ensure key registration
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
+}
+
+// Public wrapper for key send (for use in other modules)
+pub fn send_vk(vk: u8, pressed: bool) {
+    // Debug logging for sprint key specifically
+    if vk != 0 {
+        debug!("[KEY_SEND] VK 0x{:02X} ({}) -> {}", vk, crate::config::vk_to_name(vk), if pressed { "DOWN" } else { "UP" });
+    }
+    send_key(vk, pressed);
 }
 
 pub fn init_global_config(config: Config) {
@@ -25,7 +50,7 @@ pub fn init_global_config(config: Config) {
 }
 
 static DEFAULT_CONFIG: Config = Config {
-    version: 4,
+    version: 5,
     mouse_buttons: crate::config::MouseButtonConfig {
         left_click: 0x4B,   // 'K' key (Y button)
         right_click: 0x4C,  // 'L' key (ZR shoulder)
@@ -61,6 +86,8 @@ static DEFAULT_CONFIG: Config = Config {
     magnesis_sensitivity: 0.5,
     camera_sensitivity_pct: 50.0,
     language: Language::English,
+    sprint_key: winuser::VK_LSHIFT as u8, // Default to Left Shift
+    sprint_toggle_enabled: true,
 };
 
 pub fn get_global_config() -> &'static Config {
@@ -87,6 +114,7 @@ pub fn keyboard_emulation_tick(active: bool) {
 
         let config = get_global_config();
 
+        // At this point, mod is active (gated above). We still support a clean release path
         if !active {
             // On deactivate, ensure keys are released if they were held
             if LAST_L { send_key(config.mouse_buttons.left_click, false); LAST_L = false; }
@@ -177,50 +205,63 @@ pub fn keyboard_emulation_tick(active: bool) {
         }
 
         // Axis-to-key mapping from accumulated mouse movement
-        // Use higher thresholds to prevent keys being held on small movements
-        const AXIS_THRESHOLD_X: i32 = 15; // Horizontal threshold (increased to prevent small movement key holding)
-        const AXIS_THRESHOLD_Y: i32 = 25; // Vertical threshold (significantly increased to prevent small movement key holding)
+        // Only active while an in-game menu is open
+        // Use lib.rs menu detection accessor to ensure we're reading the active system
+        // Fall back to legacy menu_state module if needed
+        let menu_open = crate::is_menu_open_now() || crate::menu_state::is_in_menu();
 
-        // Check if accumulated movement exceeds threshold
-        let want_left = mx < -AXIS_THRESHOLD_X;  
-        let want_right = mx > AXIS_THRESHOLD_X;  
-        let want_up = my < -AXIS_THRESHOLD_Y;    
-        let want_down = my > AXIS_THRESHOLD_Y;
-        
-        // Press/hold keys for active directions
-        if want_left != LAST_AXIS_LEFT {
-            send_key(config.mouse_axes.left, want_left);
-            LAST_AXIS_LEFT = want_left;
-        }
-        if want_right != LAST_AXIS_RIGHT {
-            send_key(config.mouse_axes.right, want_right);
-            LAST_AXIS_RIGHT = want_right;
-        }
-        if want_up != LAST_AXIS_UP {
-            send_key(config.mouse_axes.up, want_up);
-            LAST_AXIS_UP = want_up;
-        }
-        if want_down != LAST_AXIS_DOWN {
-            send_key(config.mouse_axes.down, want_down);
-            LAST_AXIS_DOWN = want_down;
-        }
-        
-        // Ensure exclusivity (only one direction per axis)
-        if want_left && LAST_AXIS_RIGHT {
-            send_key(config.mouse_axes.right, false);
-            LAST_AXIS_RIGHT = false;
-        }
-        if want_right && LAST_AXIS_LEFT {
-            send_key(config.mouse_axes.left, false);
-            LAST_AXIS_LEFT = false;
-        }
-        if want_up && LAST_AXIS_DOWN {
-            send_key(config.mouse_axes.down, false);
-            LAST_AXIS_DOWN = false;
-        }
-        if want_down && LAST_AXIS_UP {
-            send_key(config.mouse_axes.up, false);
-            LAST_AXIS_UP = false;
+        if menu_open {
+            // Use higher thresholds to prevent keys being held on small movements
+            const AXIS_THRESHOLD_X: i32 = 15; // Horizontal threshold (increased to prevent small movement key holding)
+            const AXIS_THRESHOLD_Y: i32 = 25; // Vertical threshold (significantly increased to prevent small movement key holding)
+
+            // Check if accumulated movement exceeds threshold
+            let want_left = mx < -AXIS_THRESHOLD_X;  
+            let want_right = mx > AXIS_THRESHOLD_X;  
+            let want_up = my < -AXIS_THRESHOLD_Y;    
+            let want_down = my > AXIS_THRESHOLD_Y;
+            
+            // Press/hold keys for active directions
+            if want_left != LAST_AXIS_LEFT {
+                send_key(config.mouse_axes.left, want_left);
+                LAST_AXIS_LEFT = want_left;
+            }
+            if want_right != LAST_AXIS_RIGHT {
+                send_key(config.mouse_axes.right, want_right);
+                LAST_AXIS_RIGHT = want_right;
+            }
+            if want_up != LAST_AXIS_UP {
+                send_key(config.mouse_axes.up, want_up);
+                LAST_AXIS_UP = want_up;
+            }
+            if want_down != LAST_AXIS_DOWN {
+                send_key(config.mouse_axes.down, want_down);
+                LAST_AXIS_DOWN = want_down;
+            }
+            
+            // Ensure exclusivity (only one direction per axis)
+            if want_left && LAST_AXIS_RIGHT {
+                send_key(config.mouse_axes.right, false);
+                LAST_AXIS_RIGHT = false;
+            }
+            if want_right && LAST_AXIS_LEFT {
+                send_key(config.mouse_axes.left, false);
+                LAST_AXIS_LEFT = false;
+            }
+            if want_up && LAST_AXIS_DOWN {
+                send_key(config.mouse_axes.down, false);
+                LAST_AXIS_DOWN = false;
+            }
+            if want_down && LAST_AXIS_UP {
+                send_key(config.mouse_axes.up, false);
+                LAST_AXIS_UP = false;
+            }
+        } else {
+            // If menu is not open, ensure any held axis keys are released
+            if LAST_AXIS_LEFT { send_key(config.mouse_axes.left, false); LAST_AXIS_LEFT = false; }
+            if LAST_AXIS_RIGHT { send_key(config.mouse_axes.right, false); LAST_AXIS_RIGHT = false; }
+            if LAST_AXIS_UP { send_key(config.mouse_axes.up, false); LAST_AXIS_UP = false; }
+            if LAST_AXIS_DOWN { send_key(config.mouse_axes.down, false); LAST_AXIS_DOWN = false; }
         }
     }
 }

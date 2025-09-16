@@ -403,6 +403,17 @@ struct CameraOffsets {
 // Global Link position pointer
 static mut g_link_position_addr: usize = 0;
 
+// Sprint toggle state
+static mut SPRINT_TOGGLE_ACTIVE: bool = false;      // logical toggle state
+static mut SPRINT_HELD_BY_MOD: bool = false;        // whether we are currently holding the key down
+static mut LAST_LINK_POS_XZ: Option<(f32, f32)> = None;
+static mut LAST_LINK_SAMPLE_TIME: Option<Instant> = None;
+static mut LAST_HORIZ_SPEED: f32 = 0.0;             // meters/sec (approx.)
+static mut STOPPED_SINCE: Option<Instant> = None;   // when speed fell below stop threshold
+// Post-release hold helpers
+static mut SPRINT_PHYSICAL_DOWN: bool = false;      // physical key is currently down
+static mut SPRINT_ARMED_FROM_PHYSICAL: bool = false; // set on real physical press; only then engage on release
+
 fn get_camera_function() -> Result<CameraOffsets, Box<dyn std::error::Error>> {
     let function_name = CString::new("PPCRecompiler_getJumpTableBase").unwrap();
     let proc_handle = unsafe { GetModuleHandleA(std::ptr::null_mut()) };
@@ -1764,6 +1775,11 @@ fn read_menu_state() -> Option<u32> {
             None
         }
     }
+}
+
+// Public accessor for current menu open state (derived from lib.rs menu detection)
+pub fn is_menu_open_now() -> bool {
+    matches!(read_menu_state(), Some(3))
 }
 
 // Monitor menu state transitions and trigger movzx re-check on menu close (3->2)
@@ -3894,6 +3910,12 @@ fn patch(_lib: *mut std::ffi::c_void) -> Result<(), Box<dyn std::error::Error>> 
 
                 // Remove ALL input detours for complete safety
                 unsafe {
+                    // Release sprint if we were holding it
+                    let sprint_vk = utils::get_global_config().sprint_key;
+                    if SPRINT_HELD_BY_MOD && sprint_vk != 0 {
+                        crate::utils::send_key(sprint_vk, false);
+                        SPRINT_HELD_BY_MOD = false;
+                    }
                     // Remove player state runtime hook/exception handler for complete safety
                     if !g_exception_handler.is_null() {
                         use winapi::um::errhandlingapi::RemoveVectoredExceptionHandler;
@@ -4056,6 +4078,143 @@ fn patch(_lib: *mut std::ffi::c_void) -> Result<(), Box<dyn std::error::Error>> 
         // Update phonecamera open state and log transitions (always check, even when mod is inactive)
         update_phonecamera_open_state();
 
+        // Sprint toggle logic (bind the same key you use for sprint in Cemu)
+        unsafe {
+            let config = utils::get_global_config();
+            let sprint_vk = config.sprint_key;
+
+            // If feature disabled: release and clear all sprint state
+            if !config.sprint_toggle_enabled {
+                if SPRINT_HELD_BY_MOD && sprint_vk != 0 {
+                    info!("[SPRINT] Feature disabled - releasing held key");
+                    crate::utils::send_vk(sprint_vk, false);
+                }
+                SPRINT_HELD_BY_MOD = false;
+                SPRINT_TOGGLE_ACTIVE = false;
+                SPRINT_PHYSICAL_DOWN = false;
+                SPRINT_ARMED_FROM_PHYSICAL = false;
+                STOPPED_SINCE = None;
+            } else if sprint_vk != 0 {
+                // Log sprint info once
+                static mut SPRINT_INIT_LOGGED: bool = false;
+                if !SPRINT_INIT_LOGGED {
+                    info!("[SPRINT] Sprint toggle ENABLED - Key: {} (0x{:02X})", crate::config::vk_to_name(sprint_vk), sprint_vk);
+                    info!("[SPRINT] Tap sprint key while walking to toggle ON, stops automatically when you stop moving");
+info!("[SPRINT] Post-release hold: ON");
+                    SPRINT_INIT_LOGGED = true;
+                }
+
+                // Compute speed from Link position for auto-off logic
+                let link_addr = g_link_position_addr;
+                let now = Instant::now();
+                if link_addr != 0 {
+                    if let Some((x, _y, z)) = read_coordinates_safely(link_addr) {
+                        if let Some((lx, lz)) = LAST_LINK_POS_XZ {
+                            if let Some(t0) = LAST_LINK_SAMPLE_TIME {
+                                let dt = now.saturating_duration_since(t0).as_secs_f32();
+                                if dt > 0.000_1 {
+                                    let dx = x - lx;
+                                    let dz = z - lz;
+                                    let speed = ((dx * dx + dz * dz).sqrt() / dt).abs();
+                                    LAST_HORIZ_SPEED = speed;
+                                }
+                            }
+                        }
+                        LAST_LINK_POS_XZ = Some((x, z));
+                        LAST_LINK_SAMPLE_TIME = Some(now);
+                    }
+                }
+
+                // Thresholds
+                const WALK_SPEED_ON: f32 = 0.35;  // unused in post-release mode (left for reference)
+                const STOP_SPEED_OFF: f32 = 0.15; // original stop threshold (user-approved)
+                const STOP_HOLD_MS: u64 = 200;    // original stop delay (user-approved)
+
+                let cemu_focused = crate::focus::is_cemu_focused();
+                let phys_down = crate::utils::check_key_press(sprint_vk as i32);
+
+                // Track physical key transitions (distinct from our virtual hold)
+                if phys_down && !SPRINT_PHYSICAL_DOWN {
+                    // Only treat as physical press if we're not already holding via the mod
+                    if !SPRINT_HELD_BY_MOD {
+                        SPRINT_PHYSICAL_DOWN = true;
+                        SPRINT_ARMED_FROM_PHYSICAL = true; // arm post-release
+
+                        // If a hold is already active (rare), treat this as cancel intent
+                        if SPRINT_TOGGLE_ACTIVE && SPRINT_HELD_BY_MOD {
+                            crate::utils::send_vk(sprint_vk, false);
+                            SPRINT_HELD_BY_MOD = false;
+                            SPRINT_TOGGLE_ACTIVE = false;
+                            STOPPED_SINCE = None;
+                            info!("[SPRINT] Canceled by physical press");
+                        }
+                    }
+                } else if !phys_down && SPRINT_PHYSICAL_DOWN {
+                    // Physical key was released
+                    SPRINT_PHYSICAL_DOWN = false;
+
+                    // Engage only if the press came from a real physical press (armed)
+                    if SPRINT_ARMED_FROM_PHYSICAL {
+                        if cemu_focused && !SPRINT_HELD_BY_MOD {
+                            crate::utils::send_vk(sprint_vk, true);
+                            SPRINT_HELD_BY_MOD = true;
+                        }
+                        SPRINT_TOGGLE_ACTIVE = true; // reuse same auto-off logic
+                        STOPPED_SINCE = None;
+                        info!("[SPRINT] Post-release hold engaged");
+                    }
+
+                    // Disarm after handling release
+                    SPRINT_ARMED_FROM_PHYSICAL = false;
+                }
+
+                // Legacy toggle: engage when tapped while walking
+                if !SPRINT_TOGGLE_ACTIVE {
+                    // Legacy tap-to-toggle disabled; use post-release hold
+                } else {
+                    if cemu_focused {
+                        if !SPRINT_HELD_BY_MOD {
+                            crate::utils::send_vk(sprint_vk, true);
+                            SPRINT_HELD_BY_MOD = true;
+                        }
+                    } else {
+                        // Release while unfocused but keep logical state
+                        if SPRINT_HELD_BY_MOD {
+                            crate::utils::send_vk(sprint_vk, false);
+                            SPRINT_HELD_BY_MOD = false;
+                        }
+                    }
+
+                    // Auto-off when stopped
+                    if LAST_HORIZ_SPEED <= STOP_SPEED_OFF {
+                        if STOPPED_SINCE.is_none() { STOPPED_SINCE = Some(now); }
+                        if let Some(ts) = STOPPED_SINCE {
+                            if now.saturating_duration_since(ts).as_millis() as u64 >= STOP_HOLD_MS {
+                                if SPRINT_HELD_BY_MOD {
+                                    crate::utils::send_vk(sprint_vk, false);
+                                    SPRINT_HELD_BY_MOD = false;
+                                }
+                                SPRINT_TOGGLE_ACTIVE = false;
+                                STOPPED_SINCE = None;
+                                info!("[SPRINT] Auto-OFF (stopped)");
+                            }
+                        }
+                    } else {
+                        STOPPED_SINCE = None;
+                    }
+                }
+            } else {
+                // Sprint key not configured (0)
+                static mut SPRINT_KEY_WARNING_LOGGED: bool = false;
+                if !SPRINT_KEY_WARNING_LOGGED {
+                    info!("[SPRINT] Sprint toggle is enabled but no sprint key is configured (sprint_key = 0)");
+                    info!("[SPRINT] Please set 'sprint_key' in your config to the same key you use for sprint in Cemu");
+                    SPRINT_KEY_WARNING_LOGGED = true;
+                }
+            }
+        }
+
+        // Early-out after sprint logic only if mod not active
         if !active {
             continue;
         }

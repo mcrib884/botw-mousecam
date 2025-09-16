@@ -67,6 +67,8 @@ fn write_header(&self) -> io::Result<()> {
             println!("  6. {:<11} → {}", t.label_axis_right, vk_to_name(self.config.mouse_axes.right));
             println!("  7. {:<11} → {}", t.label_axis_up, vk_to_name(self.config.mouse_axes.up));
             println!("  8. {:<11} → {}", t.label_axis_down, vk_to_name(self.config.mouse_axes.down));
+            // Sprint binding (bind the same key you use for sprint in Cemu)
+            println!("  9. {:<11} → {}", "Sprint", if self.config.sprint_key == 0 { String::from("(not set)") } else { vk_to_name(self.config.sprint_key) });
             println!();
             
             // Focus setting removed; focus is always required now.
@@ -83,9 +85,13 @@ fn write_header(&self) -> io::Result<()> {
             println!("  {}", t.opt_change_axis_binding);
             println!("  {}", t.opt_change_magnesis_sens);
             println!("  {}", t.opt_change_camera_sens);
+            // Sprint toggle binding (English label for now)
+            let sprint_status = if self.config.sprint_toggle_enabled { t.on_str } else { t.off_str };
+            println!("  [9]   Bind sprint key (tap while walking to toggle; auto-off on stop)");
+            println!("  [G]   Sprint toggle feature: {}", sprint_status);
             println!("  {}", t.opt_reset_defaults);
             println!("  {}", t.opt_continue_to_game);
-println!("  {} ({})", t.opt_change_language, language_name(self.config.language));
+            println!("  {} ({})", t.opt_change_language, language_name(self.config.language));
             println!();
             
             self.write_colored(Color::White, t.prompt_choice)?;
@@ -104,6 +110,20 @@ match input.as_str() {
                 "6" => self.change_key_binding("axis_right")?,
                 "7" => self.change_key_binding("axis_up")?,
                 "8" => self.change_key_binding("axis_down")?,
+                "9" => {
+                    self.change_sprint_key()?;
+                    self.auto_save()?;
+                },
+                "G" => {
+                    self.config.sprint_toggle_enabled = !self.config.sprint_toggle_enabled;
+                    let status = if self.config.sprint_toggle_enabled { "ON" } else { "OFF" };
+                    self.write_colored(Color::Green, &format!("✓ Sprint toggle feature: {}\n", status))?;
+                    // If disabling, ensure any held sprint key is released
+                    if !self.config.sprint_toggle_enabled && self.config.sprint_key != 0 {
+                        crate::utils::send_key(self.config.sprint_key, false);
+                    }
+                    self.auto_save()?;
+                },
                 "L" => {
                     self.change_language()?;
                     self.auto_save()?;
@@ -187,6 +207,101 @@ let t = self.t();
         Ok(())
     }
     
+    fn listen_for_sprint_key_press(&self) -> Option<u8> {
+        use winapi::um::winuser;
+
+        fn is_valid_sprint_binding_vk(vk: u8) -> bool {
+            // Allow A-Z, 0-9, F1-F24, Arrow keys, AND modifier keys for sprint binding
+            match vk {
+                0x30..=0x39 => true,            // 0-9 (numeric row)
+                0x60..=0x69 => true,            // Numpad 0-9
+                0x41..=0x5A => true,            // A-Z
+                0x70..=0x87 => true,            // F1-F24
+                x if x == winuser::VK_LEFT as u8
+                  || x == winuser::VK_RIGHT as u8
+                  || x == winuser::VK_UP as u8
+                  || x == winuser::VK_DOWN as u8 => true,
+                // ALLOW modifier keys for sprint binding
+                x if x == winuser::VK_SHIFT as u8
+                  || x == winuser::VK_LSHIFT as u8
+                  || x == winuser::VK_RSHIFT as u8
+                  || x == winuser::VK_CONTROL as u8
+                  || x == winuser::VK_LCONTROL as u8
+                  || x == winuser::VK_RCONTROL as u8
+                  || x == winuser::VK_MENU as u8
+                  || x == winuser::VK_LMENU as u8
+                  || x == winuser::VK_RMENU as u8 => true,
+                // Allow commonly used keys for sprint
+                x if x == winuser::VK_SPACE as u8
+                  || x == winuser::VK_TAB as u8 => true,
+                _ => false,
+            }
+        }
+        
+        // Wait for any current key presses to clear (including Enter from menu selection)
+        thread::sleep(Duration::from_millis(500));
+        
+        // Clear any lingering key states
+        unsafe {
+            for vk in 0..=255u8 {
+                winuser::GetAsyncKeyState(vk as i32);
+            }
+        }
+        
+        println!("Ready! Press the key you want to use for sprint toggle (including Shift, Ctrl, Alt)...");
+        
+        let mut last_key_state = [false; 256];
+        
+        // Listen for key presses for up to 10 seconds
+        let start_time = std::time::Instant::now();
+        let timeout = Duration::from_secs(10);
+        
+        while start_time.elapsed() < timeout {
+            unsafe {
+                for vk in 0..=255u8 {
+                    let current_state = (winuser::GetAsyncKeyState(vk as i32) as u32) & 0x8000 != 0;
+                    
+                    // Detect key press (transition from not pressed to pressed)
+                    if current_state && !last_key_state[vk as usize] {
+                        // Filter out disallowed keys: mouse buttons, system/media keys, Enter/Escape/Space, Win keys
+                        // BUT ALLOW modifier keys for sprint
+                        let is_mouse_btn = vk == winuser::VK_LBUTTON as u8
+                            || vk == winuser::VK_RBUTTON as u8
+                            || vk == winuser::VK_MBUTTON as u8
+                            || vk == winuser::VK_XBUTTON1 as u8
+                            || vk == winuser::VK_XBUTTON2 as u8;
+                        let is_win = vk == winuser::VK_LWIN as u8 || vk == winuser::VK_RWIN as u8 || vk == winuser::VK_APPS as u8;
+                        let is_nav_cancel = vk == winuser::VK_RETURN as u8 || vk == winuser::VK_ESCAPE as u8;
+                        // Note: Space and Tab are now allowed for sprint binding
+                        // Media/system keys (volume/media/app launch)
+                        let is_media = matches!(vk,
+                            0xAD | 0xAE | 0xAF | // VOLUME MUTE/DOWN/UP
+                            0xB0 | 0xB1 | 0xB2 | 0xB3 | // MEDIA NEXT/PREV/STOP/PLAY-PAUSE
+                            0xB4 | 0xB5 | 0xB6 | 0xB7    // LAUNCH MAIL/MEDIA/APP1/APP2
+                        );
+
+                        if !is_mouse_btn && !is_win && !is_nav_cancel && !is_media && is_valid_sprint_binding_vk(vk) {
+                            return Some(vk);
+                        }
+                    }
+                    
+                    last_key_state[vk as usize] = current_state;
+                }
+            }
+            
+            // Check for ESC key to cancel
+            unsafe {
+                if (winuser::GetAsyncKeyState(winuser::VK_ESCAPE as i32) as u32) & 0x8000 != 0 {
+                    return None;
+                }
+            }
+            
+            thread::sleep(Duration::from_millis(10));
+        }
+        
+        None // Timeout
+    }
+
     fn listen_for_key_press(&self) -> Option<u8> {
         use winapi::um::winuser;
 
@@ -286,6 +401,24 @@ fn get_action_name(&self, button: &str) -> &'static str {
         }
     }
     
+fn change_sprint_key(&mut self) -> io::Result<()> {
+        // Configure which VK we should hold for sprint (bind the same key you use in Cemu)
+        let current = self.config.sprint_key;
+        let current_name = if current == 0 { String::from("(not set)") } else { vk_to_name(current) };
+        self.write_colored(Color::Cyan, "\nConfigure Sprint Key (bind the key you use for sprint in Cemu)\n")?;
+        self.write_colored(Color::Yellow, &format!("Current key: {}\n", current_name))?;
+        let t = self.t();
+        self.write_colored(Color::White, &format!("{}\n", t.press_new_key))?;
+        self.write_colored(Color::Cyan, &format!("{}\n", t.clearing_prev_inputs))?;
+        if let Some(vk_code) = self.listen_for_sprint_key_press() {
+            self.config.sprint_key = vk_code;
+            self.write_colored(Color::Green, &format!("✓ Sprint mapped to {}\n", vk_to_name(vk_code)))?;
+        } else {
+            self.write_colored(Color::Yellow, "No key pressed, keeping current sprint key.\n")?;
+        }
+        Ok(())
+    }
+
 fn change_magnesis_sensitivity(&mut self) -> io::Result<()> {
         let t = self.t();
         self.write_colored(Color::Cyan, &format!("{}\n", t.configure_magnesis_title))?;

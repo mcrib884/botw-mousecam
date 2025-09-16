@@ -15,6 +15,11 @@ fn default_camera_sensitivity_pct() -> f32 {
     50.0
 }
 
+fn default_sprint_toggle_enabled() -> bool {
+    true
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MouseButtonConfig {
     pub left_click: u8,      // VK code for left mouse button action
@@ -119,15 +124,24 @@ pub struct Config {
     #[serde(default = "default_camera_sensitivity_pct")]
     pub camera_sensitivity_pct: f32,
 
+    // Sprint key (VK) to hold for sprint toggle (bind the same key you use for sprint in Cemu)
+    #[serde(default)]
+    pub sprint_key: u8,
+
     // UI language (affects menu and init banner only)
     #[serde(default)]
     pub language: Language,
+
+    // Enable/disable sprint toggle feature
+    #[serde(default = "default_sprint_toggle_enabled")]
+    pub sprint_toggle_enabled: bool,
+
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            version: 4,  // bumped for language support
+            version: 5,  // bumped for sprint toggle
             mouse_buttons: MouseButtonConfig::default(),
             mouse_axes: MouseAxisConfig::default(),
             hide_cursor_when_active: true,
@@ -136,7 +150,9 @@ impl Default for Config {
             camera_patches: CameraPatchConfig::default(),
             magnesis_sensitivity: 0.5,
             camera_sensitivity_pct: default_camera_sensitivity_pct(),
+            sprint_key: winuser::VK_LSHIFT as u8, // Default to Left Shift
             language: Language::default(),
+            sprint_toggle_enabled: default_sprint_toggle_enabled(),
         }
     }
 }
@@ -188,6 +204,12 @@ pub fn vk_to_name(vk: u8) -> String {
         0x10 => "Shift".to_string(),
         0x11 => "Ctrl".to_string(),
         0x12 => "Alt".to_string(),
+        0xA0 => "Left Shift".to_string(),
+        0xA1 => "Right Shift".to_string(),
+        0xA2 => "Left Ctrl".to_string(),
+        0xA3 => "Right Ctrl".to_string(),
+        0xA4 => "Left Alt".to_string(),
+        0xA5 => "Right Alt".to_string(),
         0x20 => "Space".to_string(),
         0x21 => "Page Up".to_string(),
         0x22 => "Page Down".to_string(),
