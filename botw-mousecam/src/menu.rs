@@ -22,13 +22,9 @@ impl ConfigMenu {
 
 fn auto_save(&self) -> Result<(), std::io::Error> {
         if let Err(e) = self.config.save(&self.config_path) {
-            if let Err(write_err) = self.write_colored(Color::Red, &format!("✗ Auto-save failed: {}\n", e)) {
-                return Err(write_err);
-            }
+            self.write_colored(Color::Red, &format!("✗ Auto-save failed: {}\n", e))?;
         } else {
-            if let Err(write_err) = self.write_colored(Color::Green, "✓ Configuration auto-saved\n") {
-                return Err(write_err);
-            }
+            self.write_colored(Color::Green, &format!("✓ Configuration auto-saved. experimental_magnesis_fps_camera: {}\n", self.config.experimental_magnesis_fps_camera))?;
         }
         Ok(())
     }
@@ -46,6 +42,7 @@ fn write_header(&self) -> io::Result<()> {
         self.write_colored(Color::Cyan, "\n╔══════════════════════════════════════════════════════════════╗\n")?;
         self.write_colored(Color::Cyan, &format!("║{:^62}║\n", t.header_title))?;
         self.write_colored(Color::Cyan, "╚══════════════════════════════════════════════════════════════╝\n\n")?;
+        self.write_colored(Color::Yellow, &format!("experimental_magnesis_fps_camera: {}\n", self.config.experimental_magnesis_fps_camera))?;
         Ok(())
     }
     
@@ -87,8 +84,10 @@ fn write_header(&self) -> io::Result<()> {
             println!("  {}", t.opt_change_camera_sens);
             // Sprint toggle binding (English label for now)
             let sprint_status = if self.config.sprint_toggle_enabled { t.on_str } else { t.off_str };
+            let fps_status = if self.config.experimental_magnesis_fps_camera { t.on_str } else { t.off_str };
             println!("  [9]   Bind sprint key (tap while walking to toggle; auto-off on stop)");
             println!("  [G]   Sprint toggle feature: {}", sprint_status);
+            println!("  [F]   Magnesis FPS camera (experimental): {}", fps_status);
             println!("  {}", t.opt_reset_defaults);
             println!("  {}", t.opt_continue_to_game);
             println!("  {} ({})", t.opt_change_language, language_name(self.config.language));
@@ -122,6 +121,18 @@ match input.as_str() {
                     if !self.config.sprint_toggle_enabled && self.config.sprint_key != 0 {
                         crate::utils::send_key(self.config.sprint_key, false);
                     }
+                    self.auto_save()?;
+                },
+                "F" => {
+                    let t = self.t();
+                    self.config.experimental_magnesis_fps_camera = !self.config.experimental_magnesis_fps_camera;
+                    self.write_colored(
+                        Color::Green,
+                        &format!(
+                            "✓ Magnesis FPS camera (experimental): {}\n",
+                            if self.config.experimental_magnesis_fps_camera { t.on_str } else { t.off_str }
+                        ),
+                    )?;
                     self.auto_save()?;
                 },
                 "L" => {
@@ -705,7 +716,8 @@ let t = self.t();
                 }
                 "" => return Ok(true), // Enter = back
                 _ => {
-                    self.write_colored(Color::Red, "Invalid option. Try again.\n")?;
+                    let t = self.t();
+                    self.write_colored(Color::Red, &format!("{}\n", t.invalid_option))?;
                 }
             }
 

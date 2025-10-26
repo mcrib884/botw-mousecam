@@ -14,6 +14,9 @@ const DEFAULT_DISTANCE: f32 = 6.5; // 30% farther than previous 5.0
 const MAGNESIS_FOCUS_SMOOTH_DURATION: f32 = 0.25; // seconds (between 0.2-0.3s as requested)
 const MAGNESIS_FOCUS_SNAP_THRESHOLD: f32 = 1.0;   // meters change to trigger smoothing
 
+// Additive zoom step (meters) applied per 1.0 wheel unit (wheel returns ~0.2 per detent)
+const WHEEL_ZOOM_METERS: f32 = 1.5; // 0.2 unit -> ~0.30m per detent (3x larger)
+
 #[derive(Clone, Copy)]
 pub struct Vec3BE(pub [FloatBE; 3]);
 
@@ -113,6 +116,7 @@ pub struct OrbitCamera {
     pub saved_focus_x: f32, // Saved focus point X when magnesis activates
     pub saved_focus_y: f32, // Saved focus point Y when magnesis activates
     pub saved_focus_z: f32, // Saved focus point Z when magnesis activates
+    pub saved_distance: f32, // Saved orbit distance when magnesis activates (for FPS restore)
 
     // Smoothed focus handling for magnesis
     pub focus_smooth: glm::Vec3,
@@ -147,6 +151,7 @@ impl OrbitCamera {
             saved_focus_x: 0.0,
             saved_focus_y: 0.0,
             saved_focus_z: 0.0,
+            saved_distance: DEFAULT_DISTANCE,
 
             // Focus smoothing defaults
             focus_smooth: glm::vec3(0.0, 0.0, 0.0),
@@ -276,11 +281,11 @@ impl OrbitCamera {
         // Update zoom state first
         self.update_smooth_zoom();
         
-        // ULTRA-FAST zoom smoothing - no lag on zoom changes
+        // Smooth zoom follow - slower to reduce twitchiness
         let zoom_diff = self.target_distance - self.distance;
-        let zoom_move_amount = 35.0 * delta_time; // Ultra-fast zoom for 1200Hz refresh rates
-        if zoom_diff.abs() > 0.005 { // Smaller threshold for more responsive zoom
-            let zoom_ratio = (zoom_move_amount / zoom_diff.abs()).min(0.9); // Slightly more aggressive
+        let zoom_move_amount = 12.0 * delta_time; // gentler follow speed
+        if zoom_diff.abs() > 0.005 { // threshold to avoid micro adjustments
+            let zoom_ratio = (zoom_move_amount / zoom_diff.abs()).min(0.35); // cap per-frame change at 35%
             self.distance = self.distance + zoom_diff * zoom_ratio;
         }
         
@@ -402,10 +407,12 @@ impl OrbitCamera {
         self.saved_focus_x = self.smooth_player_pos.x;
         self.saved_focus_y = self.smooth_player_pos.y;
         self.saved_focus_z = self.smooth_player_pos.z;
+        // Save current zoom distance so we can restore after FPS magnesis ends
+        self.saved_distance = self.distance;
         self.magnesis_rotation_protected = true;
         
-        info!("[CAMERA] Saved camera rotation and focus for magnesis protection: theta={:.3}, phi={:.3}, focus=({:.3}, {:.3}, {:.3})", 
-              self.saved_theta, self.saved_phi, self.saved_focus_x, self.saved_focus_y, self.saved_focus_z);
+        info!("[CAMERA] Saved camera rotation and focus for magnesis protection: theta={:.3}, phi={:.3}, focus=({:.3}, {:.3}, {:.3}), dist={:.3}", 
+              self.saved_theta, self.saved_phi, self.saved_focus_x, self.saved_focus_y, self.saved_focus_z, self.saved_distance);
     }
     
     /// Restore camera rotation and focus from magnesis protection and disable protection
@@ -434,14 +441,19 @@ impl OrbitCamera {
         }
     }
 
-    /// Clear magnesis rotation protection WITHOUT restoring saved rotation or focus
-    /// This avoids snapping the camera back to the pre-magnesis state when magnesis ends
+    /// Clear magnesis rotation protection WITHOUT restoring saved rotation or focus.
+    /// Restores only the zoom distance if FPS magnesis mode is enabled, so zoom returns to pre-activation value.
     pub fn clear_magnesis_rotation_protection(&mut self) {
         if self.magnesis_rotation_protected {
+            // If FPS magnesis was used, restore previous distance smoothly
+            if crate::utils::get_global_config().experimental_magnesis_fps_camera {
+                self.target_distance = self.saved_distance;
+                info!("[CAMERA] Restoring pre-magnesis zoom distance: target_distance={:.3}", self.target_distance);
+            }
             self.magnesis_rotation_protected = false;
             // Intentionally DO NOT modify theta/phi or player/focus positions here.
             // Keeping the current orientation and focus prevents visible snapping when magnesis is disabled.
-            info!("[CAMERA] Cleared magnesis rotation protection without restoration (keeping current view)");
+            info!("[CAMERA] Cleared magnesis rotation protection (kept orientation), distance restored if FPS mode");
         }
     }
 
@@ -560,84 +572,29 @@ impl OrbitCamera {
     }
 
     fn handle_smooth_zoom(&mut self, zoom_delta: f32) {
-        let now = std::time::Instant::now();
-        
-        // Determine zoom duration based on sequence count
-        let base_duration = 0.5; // 0.5 seconds for first zoom
-        let duration = match self.zoom_state.zoom_count {
-            0 => base_duration,         // 0.5s for first
-            1 => base_duration * 0.4,   // 0.2s for second  
-            2 => base_duration * 0.2,   // 0.1s for third
-            _ => base_duration * 0.2,   // 0.1s for subsequent
-        };
-        
-        // Check if this is a new zoom sequence (more than 1 second since last zoom)
-        let is_new_sequence = if let Some(start_time) = self.zoom_state.zoom_start_time {
-            now.duration_since(start_time).as_secs_f32() > 1.0
+        // New behavior: apply zoom as discrete steps directly to target_distance,
+        // and let the camera distance smoothly approach that target.
+        if zoom_delta == 0.0 { return; }
+
+        let delta_meters = zoom_delta * WHEEL_ZOOM_METERS;
+        if self.phonecamera_zoom_active {
+            // In photo mode, allow negative distances if needed
+            self.target_distance -= delta_meters;
         } else {
-            true
-        };
-        
-        if is_new_sequence {
-            // Start new zoom sequence
-            self.zoom_state.zoom_count = 0;
-            self.zoom_state.initial_distance = self.distance;
-            self.zoom_state.pending_zoom = 0.0;
-            self.zoom_state.final_applied = false;
+            self.target_distance = (self.target_distance - delta_meters).clamp(0.5, 50.0);
         }
-        
-        // Accumulate zoom (consistent symmetric steps)
-        self.zoom_state.pending_zoom += zoom_delta * 1.0; // Symmetric zoom magnitude
-        self.zoom_state.zoom_start_time = Some(now);
-        self.zoom_state.zoom_duration = duration;
-        self.zoom_state.zoom_count += 1;
-        self.zoom_state.final_applied = false; // Reset since we have new zoom input
+
+        // Clear legacy animation state to avoid interference
+        self.zoom_state.pending_zoom = 0.0;
+        self.zoom_state.zoom_start_time = None;
+        self.zoom_state.zoom_duration = 0.0;
+        self.zoom_state.zoom_count = 0;
+        self.zoom_state.final_applied = false;
     }
     
     fn update_smooth_zoom(&mut self) {
-        if let Some(start_time) = self.zoom_state.zoom_start_time {
-            let now = std::time::Instant::now();
-            let elapsed = now.duration_since(start_time).as_secs_f32();
-            
-            if elapsed < self.zoom_state.zoom_duration && self.zoom_state.pending_zoom != 0.0 {
-                // Calculate smooth interpolation (ease-out curve)
-                let progress = elapsed / self.zoom_state.zoom_duration;
-                let ease_out = 1.0 - (1.0 - progress).powi(3); // Cubic ease-out
-                
-                // Apply zoom with smooth curve - clamp only in normal mode, not PhoneCamera mode
-                let zoom_factor = 1.0 - (self.zoom_state.pending_zoom * ease_out * 0.5);
-                let new_distance = self.zoom_state.initial_distance * zoom_factor;
-                
-                if self.phonecamera_zoom_active {
-                    // PhoneCamera mode: Allow negative distances (no clamping)
-                    self.target_distance = new_distance;
-                } else {
-                    // Normal mode: Clamp to prevent camera passing through player
-                    self.target_distance = new_distance.clamp(0.5, 50.0);
-                }
-                
-            } else if self.zoom_state.pending_zoom != 0.0 && !self.zoom_state.final_applied {
-                // Zoom animation complete, apply final zoom ONCE with appropriate clamping
-                let zoom_factor = 1.0 - (self.zoom_state.pending_zoom * 0.5);
-                let new_distance = self.zoom_state.initial_distance * zoom_factor;
-                
-                if self.phonecamera_zoom_active {
-                    // PhoneCamera mode: Allow negative distances (no clamping)
-                    self.target_distance = new_distance;
-                } else {
-                    // Normal mode: Clamp to prevent camera passing through player
-                    self.target_distance = new_distance.clamp(0.5, 50.0);
-                }
-                
-                self.zoom_state.final_applied = true; // Mark as applied to prevent re-calculation
-                
-            } else if elapsed > self.zoom_state.zoom_duration + 0.2 {
-                // Reset for next zoom if enough time has passed
-                self.zoom_state.pending_zoom = 0.0;
-                self.zoom_state.zoom_start_time = None;
-                self.zoom_state.final_applied = false;
-            }
-        }
+        // No-op: target_distance is updated directly by handle_smooth_zoom().
+        // Distance smoothing toward target happens in smooth_position_update().
     }
 
     
@@ -878,8 +835,7 @@ impl GameCamera {
                 magnesis_experimental::mark_camera_position_reset_done();
             }
             
-            // After initial setup, use normal camera controls with magnesis object updates
-            orbit_cam.update_orbit(input.orbit_x, input.orbit_y, input.zoom);
+
             
             // Get current target position (raw, no smoothing for rotation calculation)
             let target_pos = match link_position {
@@ -900,50 +856,67 @@ impl GameCamera {
             // Use normal camera positioning with immediate rotation
             let smooth_focus = orbit_cam.smooth_player_pos; // Smooth following
             
-            // Calculate focus point for magnesis mode - use midpoint between player and object
+            // Calculate focus point for magnesis mode - supports FPS-like mode when enabled
             let (final_focus, adjusted_camera_pos) = if let Some((obj_x, obj_y, obj_z)) = magnesis_experimental::get_current_magnesis_position() {
                 let object_pos = glm::vec3(obj_x, obj_y, obj_z);
                 let player_pos = smooth_focus;
                 
-                // Calculate midpoint between player and object for smooth focus tracking
-                let midpoint = (player_pos + object_pos) * 0.5;
-                
-                // Calculate distance between player and object
-                let player_object_distance = glm::length(&(object_pos - player_pos));
-                
-                // Adjust camera distance based on player-object distance
-                // Base distance of 5.0m, but scale up when object is far from player
-                let base_camera_distance = orbit_cam.distance; // Use current zoom level
-                
-                // Smooth distance factor calculation with better scaling
-                // When objects are close (< 3m apart): minimal scaling (factor ~1.0)
-                // When objects are far (> 10m apart): significant scaling to keep both in view
-                let distance_factor = if player_object_distance <= 3.0 {
-                    1.0 // No scaling for close objects
-                } else if player_object_distance <= 10.0 {
-                    // Gradual scaling from 1.0 to 2.0 for medium distances
-                    1.0 + (player_object_distance - 3.0) / 7.0
+                // If experimental FPS-like magnesis camera is enabled, place camera at (smoothed) player head
+                // and look directly at the magnesis object (with focus smoothing to avoid snaps).
+                let cfg = crate::utils::get_global_config();
+                if cfg.experimental_magnesis_fps_camera {
+                    // Treat the smoothed player position as the head/pivot position used elsewhere
+                    // Optionally, a tiny vertical bias can be applied; keep zero for now to avoid mismatches
+                    let head_pos = player_pos; // already includes torso/head offset in smoothing pipeline
+                    let smoothed_focus = orbit_cam.update_magnesis_focus(object_pos);
+                    debug!(
+                        "[CAMERA_FOCUS][FPS] Using head camera: head=({:.2},{:.2},{:.2}) focus(obj)=({:.2},{:.2},{:.2}) smoothed=({:.2},{:.2},{:.2})",
+                        head_pos.x, head_pos.y, head_pos.z, obj_x, obj_y, obj_z, smoothed_focus.x, smoothed_focus.y, smoothed_focus.z
+                    );
+                    orbit_cam.update_orbit(input.orbit_x, input.orbit_y, input.zoom);
+                    (smoothed_focus, head_pos)
                 } else {
-                    // More aggressive scaling for very distant objects
-                    2.0 + (player_object_distance - 10.0) / 10.0
-                };
-                
-                let adjusted_camera_distance = (base_camera_distance * distance_factor).min(50.0); // Cap at 50m
-                
-                // Smooth the focus when the target midpoint jumps (e.g., new object pull)
-                let smoothed_focus = orbit_cam.update_magnesis_focus(midpoint);
-                
-                debug!("[CAMERA_FOCUS] Using midpoint for focus: obj=({:.2}, {:.2}, {:.2}), player=({:.2}, {:.2}, {:.2}), midpoint=({:.2}, {:.2}, {:.2}), smoothed=({:.2}, {:.2}, {:.2}), player_obj_dist={:.2}m, dist_factor={:.2}, cam_dist={:.2}m", 
-                       obj_x, obj_y, obj_z, player_pos.x, player_pos.y, player_pos.z, midpoint.x, midpoint.y, midpoint.z, smoothed_focus.x, smoothed_focus.y, smoothed_focus.z, player_object_distance, distance_factor, adjusted_camera_distance);
-                
-                // Calculate camera position using adjusted distance from the SMOOTHED focus
-                let x = adjusted_camera_distance * orbit_cam.phi.sin() * orbit_cam.theta.cos();
-                let y = adjusted_camera_distance * orbit_cam.phi.cos();
-                let z = adjusted_camera_distance * orbit_cam.phi.sin() * orbit_cam.theta.sin();
-                
-                let camera_pos = smoothed_focus + glm::vec3(x, y, z);
-                
-                (smoothed_focus, camera_pos)
+                    // Third-person orbit: focus midpoint and back off by distance scaled to player-object separation
+                    // Calculate midpoint between player and object for smooth focus tracking
+                    let midpoint = (player_pos + object_pos) * 0.5;
+                    
+                    // Calculate distance between player and object
+                    let player_object_distance = glm::length(&(object_pos - player_pos));
+                    
+                    // Adjust camera distance based on player-object distance
+                    // Base distance of 5.0m, but scale up when object is far from player
+                    let base_camera_distance = orbit_cam.distance; // Use current zoom level
+                    
+                    // Smooth distance factor calculation with better scaling
+                    // When objects are close (< 3m apart): minimal scaling (factor ~1.0)
+                    // When objects are far (> 10m apart): significant scaling to keep both in view
+                    let distance_factor = if player_object_distance <= 3.0 {
+                        1.0 // No scaling for close objects
+                    } else if player_object_distance <= 10.0 {
+                        // Gradual scaling from 1.0 to 2.0 for medium distances
+                        1.0 + (player_object_distance - 3.0) / 7.0
+                    } else {
+                        // More aggressive scaling for very distant objects
+                        2.0 + (player_object_distance - 10.0) / 10.0
+                    };
+                    
+                    let adjusted_camera_distance = (base_camera_distance * distance_factor).min(50.0); // Cap at 50m
+                    
+                    // Smooth the focus when the target midpoint jumps (e.g., new object pull)
+                    let smoothed_focus = orbit_cam.update_magnesis_focus(midpoint);
+                    
+                    debug!("[CAMERA_FOCUS] Using midpoint for focus: obj=({:.2}, {:.2}, {:.2}), player=({:.2}, {:.2}, {:.2}), midpoint=({:.2}, {:.2}, {:.2}), smoothed=({:.2}, {:.2}, {:.2}), player_obj_dist={:.2}m, dist_factor={:.2}, cam_dist={:.2}m", 
+                           obj_x, obj_y, obj_z, player_pos.x, player_pos.y, player_pos.z, midpoint.x, midpoint.y, midpoint.z, smoothed_focus.x, smoothed_focus.y, smoothed_focus.z, player_object_distance, distance_factor, adjusted_camera_distance);
+                    
+                    // Calculate camera position using adjusted distance from the SMOOTHED focus
+                    let x = adjusted_camera_distance * orbit_cam.phi.sin() * orbit_cam.theta.cos();
+                    let y = adjusted_camera_distance * orbit_cam.phi.cos();
+                    let z = adjusted_camera_distance * orbit_cam.phi.sin() * orbit_cam.theta.sin();
+                    
+                    let camera_pos = smoothed_focus + glm::vec3(x, y, z);
+                    
+                    (smoothed_focus, camera_pos)
+                }
             } else {
                 debug!("[CAMERA_FOCUS] No object position available, using player position");
                 // Fallback to player position if object position unavailable
@@ -983,8 +956,6 @@ impl GameCamera {
                 wheel_delta,
                 crate::utils::get_global_config().magnesis_sensitivity
             );
-            
-            return;
         }
 
         // Normal camera mode - Apply rotation instantly with ZERO latency

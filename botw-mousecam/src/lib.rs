@@ -413,6 +413,8 @@ static mut STOPPED_SINCE: Option<Instant> = None;   // when speed fell below sto
 // Post-release hold helpers
 static mut SPRINT_PHYSICAL_DOWN: bool = false;      // physical key is currently down
 static mut SPRINT_ARMED_FROM_PHYSICAL: bool = false; // set on real physical press; only then engage on release
+// Track when post-release hold engaged to provide grace period before auto-off
+static mut SPRINT_ENGAGED_AT: Option<Instant> = None;
 
 fn get_camera_function() -> Result<CameraOffsets, Box<dyn std::error::Error>> {
     let function_name = CString::new("PPCRecompiler_getJumpTableBase").unwrap();
@@ -3126,7 +3128,8 @@ extern "system" fn low_level_mouse_proc(n_code: i32, w_param: WPARAM, l_param: L
                     let wheel_data = (*msllhook_struct).mouseData;
                     let wheel_delta = ((wheel_data >> 16) & 0xFFFF) as i16;
                     let normalized_delta = ((wheel_delta as i32) * 1000) / 120;
-                    MOUSE_WHEEL_DELTA.store(normalized_delta, Ordering::Relaxed);
+                    // Accumulate wheel events so rapid ticks aren’t lost between frames
+                    MOUSE_WHEEL_DELTA.fetch_add(normalized_delta, Ordering::Relaxed);
                 }
 
                 // Handle mouse buttons for gamepad mapping using simple global state
@@ -3191,7 +3194,8 @@ fn check_mouse_wheel() -> f32 {
         let hook_delta = delta_int as f32 / 1000.0;
 
         if hook_delta != 0.0 {
-            return hook_delta * 0.3; // Reduced zoom step size
+            // Reduce per-notch scale for less twitchy zoom
+            return hook_delta * 0.2;
         }
 
         0.0
@@ -3791,25 +3795,30 @@ fn patch(_lib: *mut std::ffi::c_void) -> Result<(), Box<dyn std::error::Error>> 
 
         // Handle mouse wheel and movement for experimental magnesis control (always on)
         let phonecamera_active = get_phonecamera_open_state();
-        
-        if unsafe { should_magnesis_control_mouse() } {
+
+        // Forward mouse input to magnesis, but only suppress camera control once
+        // magnesis camera actually becomes active (post startup-capture phase)
+        let magnesis_active_now = unsafe { should_magnesis_control_mouse() };
+        let magnesis_camera_should_activate_now = magnesis_active_now && !magnesis_experimental::is_in_startup_capture_phase();
+
+        if magnesis_active_now {
             // Send mouse input to magnesis control
             let wheel_delta = check_mouse_wheel();
             let config = utils::get_global_config();
             magnesis_experimental::update_magnesis_position(
-                input.orbit_x, 
-                input.orbit_y, 
-                wheel_delta, 
+                input.orbit_x,
+                input.orbit_y,
+                wheel_delta,
                 config.magnesis_sensitivity
             );
-            // Clear input so it doesn't affect camera
-            input.orbit_x = 0.0;
-            input.orbit_y = 0.0;
-            
-            // Only clear zoom input if phone camera is not active
-            // Phone camera zoom takes priority over magnesis zoom
-            if !phonecamera_active {
-                input.zoom = 0.0;
+            // Only suppress camera mouse inputs after magnesis camera takes over
+            if magnesis_camera_should_activate_now {
+                input.orbit_x = 0.0;
+                input.orbit_y = 0.0;
+                // Only clear zoom input if phone camera is not active (PhoneCamera zoom has priority)
+                if !phonecamera_active {
+                    input.zoom = 0.0;
+                }
             }
         } else {
             // Normal camera zoom handling
@@ -4094,6 +4103,7 @@ fn patch(_lib: *mut std::ffi::c_void) -> Result<(), Box<dyn std::error::Error>> 
                 SPRINT_PHYSICAL_DOWN = false;
                 SPRINT_ARMED_FROM_PHYSICAL = false;
                 STOPPED_SINCE = None;
+                SPRINT_ENGAGED_AT = None;
             } else if sprint_vk != 0 {
                 // Log sprint info once
                 static mut SPRINT_INIT_LOGGED: bool = false;
@@ -4129,6 +4139,7 @@ info!("[SPRINT] Post-release hold: ON");
                 const WALK_SPEED_ON: f32 = 0.35;  // unused in post-release mode (left for reference)
                 const STOP_SPEED_OFF: f32 = 0.15; // original stop threshold (user-approved)
                 const STOP_HOLD_MS: u64 = 200;    // original stop delay (user-approved)
+                const ENGAGE_GRACE_MS: u64 = 750; // minimum time to keep hold before evaluating auto-off
 
                 let cemu_focused = crate::focus::is_cemu_focused();
                 let phys_down = crate::utils::check_key_press(sprint_vk as i32);
@@ -4146,6 +4157,7 @@ info!("[SPRINT] Post-release hold: ON");
                             SPRINT_HELD_BY_MOD = false;
                             SPRINT_TOGGLE_ACTIVE = false;
                             STOPPED_SINCE = None;
+                            SPRINT_ENGAGED_AT = None;
                             info!("[SPRINT] Canceled by physical press");
                         }
                     }
@@ -4161,6 +4173,7 @@ info!("[SPRINT] Post-release hold: ON");
                         }
                         SPRINT_TOGGLE_ACTIVE = true; // reuse same auto-off logic
                         STOPPED_SINCE = None;
+                        SPRINT_ENGAGED_AT = Some(now);
                         info!("[SPRINT] Post-release hold engaged");
                     }
 
@@ -4185,21 +4198,31 @@ info!("[SPRINT] Post-release hold: ON");
                         }
                     }
 
-                    // Auto-off when stopped
-                    if LAST_HORIZ_SPEED <= STOP_SPEED_OFF {
-                        if STOPPED_SINCE.is_none() { STOPPED_SINCE = Some(now); }
-                        if let Some(ts) = STOPPED_SINCE {
-                            if now.saturating_duration_since(ts).as_millis() as u64 >= STOP_HOLD_MS {
-                                if SPRINT_HELD_BY_MOD {
-                                    crate::utils::send_vk(sprint_vk, false);
-                                    SPRINT_HELD_BY_MOD = false;
+                    // Auto-off when stopped (respect a short grace period after engagement)
+                    let within_grace = SPRINT_ENGAGED_AT
+                        .map(|t| (now.saturating_duration_since(t).as_millis() as u64) < ENGAGE_GRACE_MS)
+                        .unwrap_or(false);
+
+                    if !within_grace {
+                        if LAST_HORIZ_SPEED <= STOP_SPEED_OFF {
+                            if STOPPED_SINCE.is_none() { STOPPED_SINCE = Some(now); }
+                            if let Some(ts) = STOPPED_SINCE {
+                                if now.saturating_duration_since(ts).as_millis() as u64 >= STOP_HOLD_MS {
+                                    if SPRINT_HELD_BY_MOD {
+                                        crate::utils::send_vk(sprint_vk, false);
+                                        SPRINT_HELD_BY_MOD = false;
+                                    }
+                                    SPRINT_TOGGLE_ACTIVE = false;
+                                    STOPPED_SINCE = None;
+                                    SPRINT_ENGAGED_AT = None;
+                                    info!("[SPRINT] Auto-OFF (stopped)");
                                 }
-                                SPRINT_TOGGLE_ACTIVE = false;
-                                STOPPED_SINCE = None;
-                                info!("[SPRINT] Auto-OFF (stopped)");
                             }
+                        } else {
+                            STOPPED_SINCE = None;
                         }
                     } else {
+                        // During grace period, keep hold and reset stop timer
                         STOPPED_SINCE = None;
                     }
                 }
@@ -4296,9 +4319,9 @@ info!("[SPRINT] Post-release hold: ON");
                 } else {
                     // Deactivate experimental magnesis control
                     magnesis_experimental::deactivate_magnesis_control();
-                    // Keep camera as-is and sync model to current game camera to avoid micro-shift
-                    orbit_cam.clear_magnesis_rotation_protection();
+                    // First sync to the game camera to avoid micro-shift, then restore FPS zoom
                     orbit_cam.sync_to_game_camera(gc);
+                    orbit_cam.clear_magnesis_rotation_protection();
                 }
                 LAST_MAGNESIS_STATE = magnesis_is_active;
             }
@@ -4553,14 +4576,11 @@ info!("[SPRINT] Post-release hold: ON");
                     }
                 }
 
-                // Enforce rotation protection if magnesis is active in either mode
-                // This must happen after all orbit camera updates but before applying to game camera
-                if magnesis_is_active {
+                // Enforce rotation protection only when magnesis camera control is active
+                // During startup-capture (before NOPing), keep normal orbit updates responsive
+                if magnesis_camera_should_activate {
                     orbit_cam.enforce_magnesis_rotation_protection();
-                }
-                
-                // Final rotation enforcement - apply saved rotation if magnesis protection is active
-                if magnesis_is_active {
+                    // Final reinforcement to ensure saved rotation is applied when active
                     orbit_cam.enforce_magnesis_rotation_protection();
                 }
                 
@@ -4575,8 +4595,185 @@ info!("[SPRINT] Post-release hold: ON");
                 gc.rot = camera_up.into();
             } else {
                 // MAGNESIS MODE
-                // Dynamic camera system with fixed relationships that don't change with player movement
                 if let Some((obj_x, obj_y, obj_z)) = crate::magnesis_experimental::get_current_magnesis_position() {
+                    let cfg = utils::get_global_config();
+                    if cfg.experimental_magnesis_fps_camera {
+                        // FPS camera: fix camera at player head; only rotate to face object (no vertical follow of object)
+                        let mut head_opt: Option<glm::Vec3> = None;
+                        if link_addr != 0 {
+                            if let Some((px, py, pz)) = read_coordinates_safely(link_addr) {
+                                head_opt = Some(glm::vec3(px, py + 1.8, pz));
+                            }
+                        }
+                        if head_opt.is_none() {
+                            if let Some((bpx, bpy, bpz)) = crate::magnesis_experimental::get_base_player_position() {
+                                head_opt = Some(glm::vec3(bpx, bpy + 1.8, bpz));
+                            }
+                        }
+                        if let Some(head_pos) = head_opt {
+                            // Smooth the focus on the object to avoid snaps when target changes abruptly
+                            let smoothed_focus = orbit_cam.update_magnesis_focus(glm::vec3(obj_x, obj_y, obj_z));
+                            // Apply FPS camera: position at head, focus on object
+                            gc.pos = head_pos.into();
+                            gc.focus = smoothed_focus.into();
+                            // Compute rotation to face the object
+                            let up = glm::vec3(0.0, 1.0, 0.0);
+                            let forward = glm::normalize(&(smoothed_focus - head_pos));
+                            let right = glm::normalize(&glm::cross::<f32, glm::U3>(&forward, &up));
+                            let camera_up = glm::cross::<f32, glm::U3>(&right, &forward);
+                            gc.rot = camera_up.into();
+                        } else {
+                            // Fallback to third-person behavior if we cannot resolve a head position
+                            if let Some((base_obj_x, base_obj_y, base_obj_z)) = crate::magnesis_experimental::get_base_magnesis_position() {
+                                if let Some((base_player_x, base_player_y, base_player_z)) = crate::magnesis_experimental::get_base_player_position() {
+                                    if link_addr != 0 {
+                                        if let Some((current_player_x, current_player_y, current_player_z)) = read_coordinates_safely(link_addr) {
+                                            // Use BASE positions for all distance/focus calculations (completely stable)
+                                            let base_dx = base_obj_x - base_player_x;
+                                            let base_dz = base_obj_z - base_player_z;
+                                            let base_horizontal_distance = (base_dx * base_dx + base_dz * base_dz).sqrt().max(1.0);
+                                            
+                                            // Use CURRENT Y difference for vertical behavior (responsive to vertical movement only)
+                                            let base_dy = base_obj_y - base_player_y;
+                                            let current_dy = obj_y - current_player_y;
+                                            let vertical_change = current_dy - base_dy; // how much Y has changed from base
+                                            
+                                            // Calculate current object direction for focus calculation only
+                                            let current_dx = obj_x - current_player_x;
+                                            let current_dz = obj_z - current_player_z;
+                                            
+                                            // Camera distance: use original stable calculation (no dynamic scaling)
+                                            let height_factor = (vertical_change / base_horizontal_distance).max(-1.0);
+                                            let distance_multiplier = 1.0 + height_factor * 0.140625; // Original height-based adjustment
+                                            let camera_distance = base_horizontal_distance * 1.875 * distance_multiplier; // Original stable distance
+                                            
+                                            // Camera height: smooth transition zone between 4.5m and 5.5m (1 meter transition)
+                                            let normal_camera_height = {
+                                                let base_camera_height = base_player_y + 4.0;
+                                                let dynamic_height_offset = height_factor * 2.5;
+                                                base_camera_height + dynamic_height_offset
+                                            };
+                                            
+                                            let above_object_height = obj_y + 5.0;  // Camera 5m above object mode
+                                            
+                                            let target_camera_height = if obj_y <= 4.5 {
+                                                // Below 4.5m: use normal camera height calculation
+                                                normal_camera_height
+                                            } else if obj_y >= 5.5 {
+                                                // Above 5.5m: use above-object mode (5m above object)
+                                                above_object_height
+                                            } else {
+                                                // Transition zone (4.5m to 5.5m): smooth interpolation between modes
+                                                let transition_progress = (obj_y - 4.5) / 1.0;  // 0.0 at 4.5m, 1.0 at 5.5m
+                                                let smoothed_progress = transition_progress * transition_progress * (3.0 - 2.0 * transition_progress); // Smooth step function
+                                                
+                                                // Linear interpolation between normal and above-object heights
+                                                normal_camera_height * (1.0 - smoothed_progress) + above_object_height * smoothed_progress
+                                            };
+                                            
+                                            // Persistent camera height for smooth transitions
+                                            static mut PERSISTENT_CAMERA_Y: f32 = 0.0;
+                                            static mut CAMERA_Y_INITIALIZED: bool = false;
+                                            
+                                            let mut camera_y = unsafe {
+                                                if !CAMERA_Y_INITIALIZED {
+                                                    PERSISTENT_CAMERA_Y = normal_camera_height;
+                                                    CAMERA_Y_INITIALIZED = true;
+                                                }
+                                                
+                                                // Smooth transition with 20% blend per frame (much faster)
+                                                PERSISTENT_CAMERA_Y = PERSISTENT_CAMERA_Y + (target_camera_height - PERSISTENT_CAMERA_Y) * 0.2;
+                                                PERSISTENT_CAMERA_Y
+                                            };
+
+                                            // Enforce a floor on camera Y during magnesis so it doesn't drop below the starting height
+                                            if let Ok(mut min_lock) = crate::camera::MAGNESIS_CAMERA_MIN_Y.lock() {
+                                                match *min_lock {
+                                                    Some(min_y) => {
+                                                        if camera_y < min_y {
+                                                            camera_y = min_y;
+                                                            // Keep the persistent value in sync with the clamped value
+                                                            unsafe { PERSISTENT_CAMERA_Y = camera_y; }
+                                                        }
+                                                    }
+                                                    None => {
+                                                        // Anchor the floor at the first computed height in magnesis mode
+                                                        *min_lock = Some(camera_y);
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // Debug camera height calculations (throttled)
+                                            {
+                                                use std::time::{Duration, Instant};
+                                                static mut LAST_HEIGHT_LOG: Option<Instant> = None;
+                                                let now = Instant::now();
+                                                let should_log = unsafe { LAST_HEIGHT_LOG.map_or(true, |t| now.duration_since(t) > Duration::from_millis(500)) };
+                                                if should_log {
+                                                    if obj_y > 4.5 && obj_y < 5.5 {
+                                                        let transition_progress = (obj_y - 4.5) / 1.0;
+                                                        info!("[CAMERA_HEIGHT] obj_y={:.2}, TRANSITION_ZONE (4.5-5.5m), progress={:.2}, normal_height={:.2}, above_obj_height={:.2}, target_height={:.2}, final_camera_y={:.2}", 
+                                                              obj_y, transition_progress, normal_camera_height, above_object_height, target_camera_height, camera_y);
+                                                        info!("[CAMERA_DISTANCE] base_dist={:.2}, height_factor={:.2}, dist_mult={:.3}, final_camera_dist={:.2}", 
+                                                              base_horizontal_distance, height_factor, distance_multiplier, camera_distance);
+                                                    } else {
+                                                        let mode = if obj_y <= 4.5 { "NORMAL" } else { "ABOVE_OBJECT" };
+                                                        info!("[CAMERA_HEIGHT] obj_y={:.2}, mode={}, normal_height={:.2}, target_height={:.2}, final_camera_y={:.2}", 
+                                                              obj_y, mode, normal_camera_height, target_camera_height, camera_y);
+                                                        info!("[CAMERA_DISTANCE] base_dist={:.2}, height_factor={:.2}, dist_mult={:.3}, final_camera_dist={:.2}", 
+                                                              base_horizontal_distance, height_factor, distance_multiplier, camera_distance);
+                                                    }
+                                                    unsafe { LAST_HEIGHT_LOG = Some(now); }
+                                                }
+                                            }
+                                            
+                                            // Focus point: Only shifts based on vertical movement (height), not horizontal push/pull
+                                            // X and Z focus always remain at 50/50 midpoint between player and object
+                                            // Y focus shifts from 50/50 to 75% object, 25% player based on height
+                                            let max_vertical_change = 20.0; // Maximum vertical movement limit
+                                            let height_blend_factor = (vertical_change / max_vertical_change).clamp(0.0, 1.0);
+                                            // Interpolate from 0.5 (50/50) to 0.75 (75% object, 25% player) for Y only
+                                            let object_weight_y = 0.5 + (0.25 * height_blend_factor);
+                                            let player_weight_y = 1.0 - object_weight_y;
+                                            
+                                            // X and Z focus calculated using actual object position (follows push/pull movements)
+                                            // Use the actual current object position for smooth midpoint tracking
+                                            let focus_x = (current_player_x + obj_x) * 0.5;
+                                            let focus_y = (base_player_y + 1.8) * player_weight_y + base_obj_y * object_weight_y + vertical_change * object_weight_y;
+                                            let focus_z = (current_player_z + obj_z) * 0.5;
+                                            let focus = glm::vec3(focus_x, focus_y, focus_z);
+                                            
+                                            // Direction from CURRENT object to CURRENT player (camera follows current positions)
+                                            // (current_dx and current_dz already calculated above)
+                                            let mut dir = glm::vec3(-current_dx, 0.0, -current_dz); // negative to get behind player
+                                            let dir_len = glm::length(&dir);
+                                            if dir_len > 0.001 {
+                                                dir = glm::normalize(&dir);
+                                                
+                                                // Position camera behind CURRENT player, using stable distance and height
+                                                let camera_x = current_player_x + dir.x * camera_distance;
+                                                let camera_z = current_player_z + dir.z * camera_distance;
+                                                
+                                                let camera_pos = glm::vec3(camera_x, camera_y, camera_z);
+                                                
+                                                // Apply camera position and focus
+                                                gc.pos = camera_pos.into();
+                                                gc.focus = focus.into();
+                                                
+                                                // Calculate rotation based on camera looking at focus
+                                                let up = glm::vec3(0.0, 1.0, 0.0);
+                                                let forward = glm::normalize(&(focus - camera_pos));
+                                                let right = glm::normalize(&glm::cross::<f32, glm::U3>(&forward, &up));
+                                                let camera_up = glm::cross::<f32, glm::U3>(&right, &forward);
+                                                gc.rot = camera_up.into();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Third-person magnesis camera (existing behavior)
                         if let Some((base_obj_x, base_obj_y, base_obj_z)) = crate::magnesis_experimental::get_base_magnesis_position() {
                             if let Some((base_player_x, base_player_y, base_player_z)) = crate::magnesis_experimental::get_base_player_position() {
                                 if link_addr != 0 {
@@ -4656,30 +4853,6 @@ info!("[SPRINT] Post-release hold: ON");
                                             }
                                         }
                                         
-                                        // Debug camera height calculations (throttled)
-                                        {
-                                            use std::time::{Duration, Instant};
-                                            static mut LAST_HEIGHT_LOG: Option<Instant> = None;
-                                            let now = Instant::now();
-                                            let should_log = unsafe { LAST_HEIGHT_LOG.map_or(true, |t| now.duration_since(t) > Duration::from_millis(500)) };
-                                            if should_log {
-                                                if obj_y > 4.5 && obj_y < 5.5 {
-                                                    let transition_progress = (obj_y - 4.5) / 1.0;
-                                                    info!("[CAMERA_HEIGHT] obj_y={:.2}, TRANSITION_ZONE (4.5-5.5m), progress={:.2}, normal_height={:.2}, above_obj_height={:.2}, target_height={:.2}, final_camera_y={:.2}", 
-                                                          obj_y, transition_progress, normal_camera_height, above_object_height, target_camera_height, camera_y);
-                                                    info!("[CAMERA_DISTANCE] base_dist={:.2}, height_factor={:.2}, dist_mult={:.3}, final_camera_dist={:.2}", 
-                                                          base_horizontal_distance, height_factor, distance_multiplier, camera_distance);
-                                                } else {
-                                                    let mode = if obj_y <= 4.5 { "NORMAL" } else { "ABOVE_OBJECT" };
-                                                    info!("[CAMERA_HEIGHT] obj_y={:.2}, mode={}, normal_height={:.2}, target_height={:.2}, final_camera_y={:.2}", 
-                                                          obj_y, mode, normal_camera_height, target_camera_height, camera_y);
-                                                    info!("[CAMERA_DISTANCE] base_dist={:.2}, height_factor={:.2}, dist_mult={:.3}, final_camera_dist={:.2}", 
-                                                          base_horizontal_distance, height_factor, distance_multiplier, camera_distance);
-                                                }
-                                                unsafe { LAST_HEIGHT_LOG = Some(now); }
-                                            }
-                                        }
-                                        
                                         // Focus point: Only shifts based on vertical movement (height), not horizontal push/pull
                                         // X and Z focus always remain at 50/50 midpoint between player and object
                                         // Y focus shifts from 50/50 to 75% object, 25% player based on height
@@ -4722,6 +4895,7 @@ info!("[SPRINT] Post-release hold: ON");
                                         }
                                     }
                                 }
+                            }
                         }
                     }
                 }

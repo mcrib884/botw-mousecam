@@ -51,23 +51,23 @@ struct Console;
 
 impl Console {
     fn success(msg: &str) {
-        println!("✅ {}", msg);
+        println!("SUCCESS: {}", msg);
     }
     
     fn error(msg: &str) {
-        println!("❌ {}", msg);
+        println!("ERROR: {}", msg);
     }
     
     fn info(msg: &str) {
-        println!("ℹ️  {}", msg);
+        println!("INFO: {}", msg);
     }
     
     fn warning(msg: &str) {
-        println!("⚠️  {}", msg);
+        println!("WARNING: {}", msg);
     }
     
     fn progress(msg: &str) {
-        println!("🔄 {}", msg);
+        println!("... {}", msg);
     }
     
     fn header() {
@@ -79,7 +79,7 @@ impl Console {
     }
     
     fn controls() {
-        println!("🎮 CONTROLS:");
+        println!("CONTROLS:");
         println!("   F3 ............. Toggle mouse camera and gamepad mode");
         println!("   F4 ............. Open configuration menu");
         println!("   Mouse .......... Orbit around Link");
@@ -138,7 +138,7 @@ impl Injector {
         
         if target_processes.is_empty() {
             return Err(InjectionError::new(
-                "No Cemu processes found. Make sure BOTW is running in Cemu."
+                "Cemu process not detected"
             ));
         }
         
@@ -218,7 +218,7 @@ impl Injector {
             CloseHandle(snapshot);
             
             if processes.is_empty() {
-                return Err(InjectionError::new("No Cemu processes found"));
+                return Err(InjectionError::new("Cemu process not detected"));
             }
             
             Console::success(&format!("Found {} Cemu process(es)", processes.len()));
@@ -576,7 +576,7 @@ impl Injector {
         }
         
         println!();
-        Console::success("🎉 INJECTION SUCCESSFUL!");
+        Console::success("INJECTION SUCCESSFUL");
         println!();
         Console::controls();
         println!();
@@ -592,7 +592,7 @@ fn show_troubleshooting() {
     println!();
     Console::error("INJECTION FAILED");
     println!();
-    println!("🛠️  TROUBLESHOOTING STEPS:");
+    println!("TROUBLESHOOTING STEPS:");
     println!("   1. Right-click injector.exe → 'Run as Administrator'");
     println!("   2. Temporarily disable antivirus/Windows Defender");
     println!("   3. Make sure BOTW is actually loaded (not just Cemu menu)");
@@ -601,10 +601,25 @@ fn show_troubleshooting() {
     println!("   6. Check Windows Event Viewer for detailed error messages");
     println!("   7. Verify {} is not corrupted", DLL_NAME);
     println!();
-    println!("💡 ADDITIONAL NOTES:");
+    println!("ADDITIONAL NOTES:");
     println!("   • Some antivirus programs block DLL injection");
     println!("   • Cemu must be running the actual game, not just the menu");
     println!("   • If using graphics packs, try disabling them temporarily");
+}
+
+fn show_cemu_not_found_message() {
+    println!();
+    println!("Cemu was not detected.");
+    println!();
+    println!("To proceed:");
+    println!("  1. Start Cemu and launch The Legend of Zelda: Breath of the Wild.");
+    println!("  2. Load into the game world (not just the main menu).");
+    println!("  3. Close this window and run injector.exe again.");
+    println!();
+    println!("If the issue persists:");
+    println!("  - If Cemu is running as Administrator, run injector.exe as Administrator as well.");
+    println!("  - Temporarily disable antivirus or add an exception for injector.exe.");
+    println!("  - Ensure Cemu is not paused and is the standard \"cemu.exe\" process.");
 }
 
 fn pause_and_exit() {
@@ -625,8 +640,14 @@ fn main() {
             // Success case already handled in run() - injector will close automatically
         }
         Err(e) => {
-            Console::error(&e.display());
-            show_troubleshooting();
+            let msg = e.display();
+            if msg.contains("Cemu process not detected") {
+                // Professional, minimal guidance for not-found case
+                show_cemu_not_found_message();
+            } else {
+                Console::error(&msg);
+                show_troubleshooting();
+            }
             pause_and_exit();
         }
     }

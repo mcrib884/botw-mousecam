@@ -136,6 +136,10 @@ pub struct Config {
     #[serde(default = "default_sprint_toggle_enabled")]
     pub sprint_toggle_enabled: bool,
 
+    // Experimental: Use FPS-like camera during Magnesis (camera at player head, focusing the object)
+    // Off by default; enable for first-person magnesis camera behavior
+    #[serde(default)]
+    pub experimental_magnesis_fps_camera: bool,
 }
 
 impl Default for Config {
@@ -153,6 +157,7 @@ impl Default for Config {
             sprint_key: winuser::VK_LSHIFT as u8, // Default to Left Shift
             language: Language::default(),
             sprint_toggle_enabled: default_sprint_toggle_enabled(),
+            experimental_magnesis_fps_camera: false,
         }
     }
 }

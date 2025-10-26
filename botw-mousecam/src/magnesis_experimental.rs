@@ -1316,8 +1316,31 @@ pub fn update_magnesis_position(delta_x: f32, delta_y: f32, wheel_delta: f32, se
             state.mouse_wheel_delta = new_wheel_acc;
         }
 
-        let radius = (state.base_radius + delta_r).max(MIN_ORBIT_RADIUS);
-        let y = state.base_y + state.mouse_delta_y * movement_scale;
+        // Base horizontal distance from player
+        let head_y = py + START_HEIGHT_OFFSET;
+        let mut horiz_radius = state.base_radius.max(MIN_ORBIT_RADIUS);
+
+        // In FPS mode, scale vertical sensitivity by how far the object is from the player
+        let vertical_scale = if crate::utils::get_global_config().experimental_magnesis_fps_camera {
+            // 1.0 at base radius, increasing with distance; clamp to avoid extremes
+            (horiz_radius / state.base_radius.max(0.001)).clamp(1.0, 3.0)
+        } else {
+            1.0
+        };
+        // Vertical movement from mouse Y
+        let mut y = state.base_y + state.mouse_delta_y * movement_scale * vertical_scale;
+
+        // Apply wheel push/pull along look direction in FPS mode: project delta along pitch
+        if crate::utils::get_global_config().experimental_magnesis_fps_camera {
+            let dy_from_head = y - head_y;
+            let pitch = dy_from_head.atan2(horiz_radius.max(0.0001));
+            // Distribute push between horizontal (cos) and vertical (sin) components
+            horiz_radius = (horiz_radius + delta_r * pitch.cos()).max(MIN_ORBIT_RADIUS);
+            y = y + delta_r * pitch.sin();
+        } else {
+            // Non-FPS: wheel affects horizontal radius only
+            horiz_radius = (horiz_radius + delta_r).max(MIN_ORBIT_RADIUS);
+        }
 
         // Compute current angle from current position relative to player
         let mut current_angle = (state.current_z - pz).atan2(state.current_x - px);
@@ -1330,8 +1353,8 @@ pub fn update_magnesis_position(delta_x: f32, delta_y: f32, wheel_delta: f32, se
         let angle = current_angle + applied_step;
 
         // Apply 24m distance limits from player (20% increase from 20m)
-        let proposed_x = px + radius * angle.cos();
-        let proposed_z = pz + radius * angle.sin();
+        let proposed_x = px + horiz_radius * angle.cos();
+        let proposed_z = pz + horiz_radius * angle.sin();
         
         // Check horizontal distance (X-Z plane) and clamp to 24m max
         let dx = proposed_x - px;
@@ -1367,7 +1390,15 @@ pub fn update_magnesis_position(delta_x: f32, delta_y: f32, wheel_delta: f32, se
         // Fallback: relative mapping if player position unavailable
         // For fallback mode, we'll limit to 24m from the base position as an approximation (20% increase from 20m)
         let proposed_x = state.base_x + state.mouse_delta_x * movement_scale;
-        let proposed_y = state.base_y + state.mouse_delta_y * movement_scale;
+        // In FPS mode, increase vertical sensitivity with distance from base
+        let vscale = if crate::utils::get_global_config().experimental_magnesis_fps_camera {
+            // Estimate radius from accumulated wheel movement relative to base
+            let est_radius = (state.base_radius + state.mouse_wheel_delta * movement_scale).max(MIN_ORBIT_RADIUS);
+            (est_radius / state.base_radius.max(0.001)).clamp(1.0, 3.0)
+        } else {
+            1.0
+        };
+        let proposed_y = state.base_y + state.mouse_delta_y * movement_scale * vscale;
         let proposed_z = state.base_z + state.mouse_wheel_delta * movement_scale;
         
         // Apply distance limits from base position (as approximation of player position)

@@ -22,7 +22,11 @@ asm_get_camera_data PROC
     jmp ending
 
     original:
-    movbe [r13 + rdx + 654h], r14d
+    push rax
+    mov  eax, r14d
+    bswap eax
+    mov  [r13 + rdx + 654h], eax
+    pop  rax
     cvtss2sd xmm0, xmm0
 
     ending:

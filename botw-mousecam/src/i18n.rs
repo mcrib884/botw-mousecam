@@ -497,7 +497,7 @@ static EN: Strings = Strings {
     camera_patches_reset: "✓ Camera patches reset to defaults",
 
     language_menu_title: "\n=== Language ===",
-    language_prompt: "Select language: [EN] English | [TR] Türkçe | [ES] Español | [DE] Deutsch",
+    language_prompt: "Select language (use language codes):",
     language_set_to_fmt: "✓ Language set to {}",
 
     init_complete_text: "Initialization COMPLETE",
@@ -598,7 +598,7 @@ static TR: Strings = Strings {
     camera_patches_reset: "✓ Kamera yamaları varsayılanlara sıfırlandı",
 
     language_menu_title: "\n=== Dil ===",
-    language_prompt: "Dil seçin: [EN] English | [TR] Türkçe | [ES] Español | [DE] Deutsch",
+    language_prompt: "Dil seçin (dil kodlarını kullanın):",
     language_set_to_fmt: "✓ Dil {} olarak ayarlandı",
 
     init_complete_text: "Başlatma TAMAMLANDI",
@@ -699,7 +699,7 @@ static ES: Strings = Strings {
     camera_patches_reset: "✓ Parches de cámara restablecidos a valores por defecto",
 
     language_menu_title: "\n=== Idioma ===",
-    language_prompt: "Seleccione idioma: [EN] English | [TR] Türkçe | [ES] Español | [DE] Deutsch",
+    language_prompt: "Seleccione idioma (use códigos de idioma):",
     language_set_to_fmt: "✓ Idioma establecido a {}",
 
     init_complete_text: "Inicialización COMPLETADA",
@@ -800,7 +800,7 @@ static DE: Strings = Strings {
     camera_patches_reset: "✓ Kamera-Patches auf Standard zurückgesetzt",
 
     language_menu_title: "\n=== Sprache ===",
-    language_prompt: "Sprache wählen: [EN] English | [DE] Deutsch | [ES] Español | [FR] Français",
+    language_prompt: "Sprache wählen (Sprachcodes verwenden):",
     language_set_to_fmt: "✓ Sprache auf {} gesetzt",
 
     init_complete_text: "Initialisierung ABGESCHLOSSEN",
@@ -895,7 +895,7 @@ static VI: Strings = Strings {
     all_patches_disabled: "✓ Đã tắt tất cả patch & chế độ camera",
     camera_patches_reset: "✓ Đã khôi phục patch camera mặc định",
     language_menu_title: "\n=== Ngôn ngữ ===",
-    language_prompt: "Chọn ngôn ngữ: [EN] English | [VI] Tiếng Việt | [ES] Español | [DE] Deutsch",
+    language_prompt: "Chọn ngôn ngữ (sử dụng mã ngôn ngữ):",
     language_set_to_fmt: "✓ Đã chuyển ngôn ngữ sang {}",
     init_complete_text: "Khởi tạo HOÀN TẤT",
     label_left_click: "Nhấp trái",
@@ -988,7 +988,7 @@ static KO: Strings = Strings {
     all_patches_disabled: "✓ 모든 카메라 패치와 디투어가 비활성화됨",
     camera_patches_reset: "✓ 카메라 패치가 기본값으로 복원됨",
     language_menu_title: "\n=== 언어 ===",
-    language_prompt: "언어 선택: [EN] English | [KO] 한국어 | [ES] Español | [DE] Deutsch",
+    language_prompt: "언어 선택 (언어 코드를 사용하세요):",
     language_set_to_fmt: "✓ 언어가 {}로 설정됨",
     init_complete_text: "초기화 완료",
     label_left_click: "왼쪽 클릭",
@@ -1086,7 +1086,7 @@ static FR: Strings = Strings {
     camera_patches_reset: "✓ Correctifs de caméra réinitialisés aux défauts",
 
     language_menu_title: "\n=== Langue ===",
-    language_prompt: "Sélectionnez la langue: [EN] English | [FR] Français | [ES] Español | [DE] Deutsch",
+    language_prompt: "Sélectionnez la langue (utilisez les codes de langue):",
     language_set_to_fmt: "✓ Langue définie sur {}",
 
     init_complete_text: "Initialisation TERMINÉE",

@@ -10,25 +10,53 @@ use winapi::shared::minwindef::WORD;
 use log::{info, debug};
 use std::sync::atomic::{Ordering, AtomicBool};
 
-// Modern keyboard emulation using SendInput for better compatibility with games
-pub fn send_key(vk: u8, pressed: bool) {
+// Determine if a virtual key is an extended key (requires KEYEVENTF_EXTENDEDKEY)
+fn is_extended_key(vk: u8) -> bool {
+    match vk as i32 {
+        // Arrow keys and navigation keys are extended
+        x if x == winuser::VK_LEFT
+            || x == winuser::VK_RIGHT
+            || x == winuser::VK_UP
+            || x == winuser::VK_DOWN
+            || x == winuser::VK_INSERT
+            || x == winuser::VK_DELETE
+            || x == winuser::VK_HOME
+            || x == winuser::VK_END
+            || x == winuser::VK_PRIOR // Page Up
+            || x == winuser::VK_NEXT  // Page Down
+            || x == winuser::VK_DIVIDE // Numpad /
+            || x == winuser::VK_NUMLOCK => true,
+        _ => false,
+    }
+}
+
+// Modern keyboard emulation using SendInput with scan codes for better compatibility
+pub fn send_key(mut vk: u8, pressed: bool) {
     unsafe {
-        let mut input = winuser::INPUT {
-            type_: winuser::INPUT_KEYBOARD,
-            u: std::mem::zeroed(),
-        };
-        
+        // Normalize generic SHIFT to Left Shift for reliability
+        if vk as i32 == winuser::VK_SHIFT { vk = winuser::VK_LSHIFT as u8; }
+
+        let sc = winuser::MapVirtualKeyA(vk as u32, winuser::MAPVK_VK_TO_VSC) as WORD;
+
+        let use_scancode = sc != 0;
+        let extended = is_extended_key(vk);
+
+        let mut input = winuser::INPUT { type_: winuser::INPUT_KEYBOARD, u: std::mem::zeroed() };
+        let flags = if use_scancode { winuser::KEYEVENTF_SCANCODE } else { 0 }
+            | if !pressed { winuser::KEYEVENTF_KEYUP } else { 0 }
+            | if extended { winuser::KEYEVENTF_EXTENDEDKEY } else { 0 };
+
         *input.u.ki_mut() = winuser::KEYBDINPUT {
-            wVk: vk as WORD,
-            wScan: 0,
-            dwFlags: if pressed { 0 } else { winuser::KEYEVENTF_KEYUP },
+            wVk: if use_scancode { 0 } else { vk as WORD },
+            wScan: if use_scancode { sc } else { 0 },
+            dwFlags: flags,
             time: 0,
             dwExtraInfo: 0,
         };
-        
+
         winuser::SendInput(1, &mut input, std::mem::size_of::<winuser::INPUT>() as i32);
-        
-        // Add small delay to ensure key registration
+
+        // Small delay to ensure registration
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
@@ -44,6 +72,7 @@ pub fn send_vk(vk: u8, pressed: bool) {
 
 pub fn init_global_config(config: Config) {
     unsafe {
+        info!("[CONFIG] Initializing global configuration. experimental_magnesis_fps_camera: {}", config.experimental_magnesis_fps_camera);
         GLOBAL_CONFIG = Some(config);
         info!("[CONFIG] Global configuration initialized");
     }
@@ -88,6 +117,7 @@ static DEFAULT_CONFIG: Config = Config {
     language: Language::English,
     sprint_key: winuser::VK_LSHIFT as u8, // Default to Left Shift
     sprint_toggle_enabled: true,
+    experimental_magnesis_fps_camera: false,
 };
 
 pub fn get_global_config() -> &'static Config {
@@ -682,12 +712,10 @@ pub fn handle_mouse_input(input: &mut MouseInput) {
         let camera_orbit_y = delta_y as f32 * camera_sensitivity;
         
         if !magnesis_is_active {
-            // Normal mode - apply camera controls
+            // Normal mode - apply camera controls (wheel handled in main loop via check_mouse_wheel)
             input.orbit_x = camera_orbit_x;
             input.orbit_y = camera_orbit_y;
-            
-            // Always forward wheel input; mode-specific logic handles how to use it
-            input.zoom = crate::MOUSE_WHEEL_DELTA.swap(0, std::sync::atomic::Ordering::Relaxed) as f32 * 0.1;
+            input.zoom = 0.0; // leave wheel delta to be processed centrally
         } else {
             // Experimental magnesis always ON: pass mouse deltas to magnesis module
             input.orbit_x = camera_orbit_x;
