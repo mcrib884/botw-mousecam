@@ -2,11 +2,6 @@
 
 This mod lets the user control the Breath of the Wild camera with a mouse on Cemu, with smooth orbit, precise aiming, and game-native feel. This project exists thanks to the groundwork and ideas from etra0 and LibreVR — their work is referenced throughout and credited here.
 
-### What this mod does
-- Replaces right-stick camera with a mouse-driven orbit camera
-- Scroll-wheel zoom 
-- Clean toggle to enable/disable the mod at runtime
-
 ### Components (release folder)
 - `botw_mousecam.dll` — the camera logic injected into Cemu
 - `injector.exe` — the tiny helper that injects the DLL into Cemu once the game is loaded
@@ -27,18 +22,11 @@ This mod lets the user control the Breath of the Wild camera with a mouse on Cem
 ### How it works 
 - `injector.exe` attaches to the Cemu process and loads `botw_mousecam.dll`.
 - `position_finder.exe` finds the player/camera/state addresses safely, and shares them with the DLL via shared memory.
-- The DLL:
-  - Reads Link position 
-  - Maintains a smooth-follow focus point 
-  - Detects player state to adjust the view during aiming (subtle right/up offset with smooth blending and a small FOV change).
-  - Keeps wheel zoom independent and smooth.
 
 All credit to etra0 and LibreVR for foundational research and prior art that made this possible. This project stands on their shoulders.
 
 ### Configuration
 - Press F4 in-game to open the configuration menu.
-- Settings include mouse sensitivity, zoom behavior, and other camera options.
-
 
 ### Build (developers)
 Requirements:
@@ -51,10 +39,6 @@ Steps:
   - `cargo clean && cargo build --release`
 - Publish `position_finder` as a single-file, self-contained exe:
   - `dotnet publish position_finder/position_finder.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -p:IncludeNativeLibrariesForSelfExtract=true -p:IncludeAllContentForSelfExtract=true -o position_finder/publish`
-- Place artifacts into root `release/`:
-  - `release/botw_mousecam.dll`
-  - `release/injector.exe`
-  - `release/position_finder.exe`
 
 - Or just use the build_all.bat that does all the above
 
@@ -64,11 +48,9 @@ Steps:
 - Mouse not moving the camera: press F3 to ensure the mod is active; press F4 to confirm config bindings.
 - Mod never initalizes: mod only initializes when you are in game,and menus closed.Its best if you only launch the mod when you are in world.since other scenarios might cause crashes.
 
-
 ### Credits
 - Author: **mcrib884**
 - Developed thanks to **etra0** and **LibreVR** — their tools, research, and prior projects made this mod possible.
-
 
 ### License
 See `LICENSE` in this repository.
